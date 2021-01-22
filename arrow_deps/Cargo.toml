@@ -14,6 +14,7 @@ description = "Apache Arrow / Parquet / DataFusion dependencies for InfluxDB IOx
 # The version can be found here: https://github.com/apache/arrow/commit/3ec449bb38a29dac13f81a0f1fdaaa191b0a4b27
 #
 arrow = { git = "https://github.com/apache/arrow.git", rev = "3ec449bb38a29dac13f81a0f1fdaaa191b0a4b27" , features = ["simd"] }
+arrow-flight = { git = "https://github.com/apache/arrow.git", rev = "3ec449bb38a29dac13f81a0f1fdaaa191b0a4b27" }
 datafusion = { git = "https://github.com/apache/arrow.git", rev = "3ec449bb38a29dac13f81a0f1fdaaa191b0a4b27" }
 # Turn off the "arrow" feature; it currently has a bug that causes the crate to rebuild every time
 # and we're not currently using it anyway
