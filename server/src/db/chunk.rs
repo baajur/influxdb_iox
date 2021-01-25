@@ -1,5 +1,6 @@
 use arrow_deps::{
-    arrow::record_batch::RecordBatch, datafusion::logical_plan::LogicalPlan,
+    arrow::record_batch::RecordBatch,
+    datafusion::{logical_plan::LogicalPlan, physical_plan::SendableRecordBatchStream},
     util::str_iter_to_batch,
 };
 use query::{
@@ -74,34 +75,13 @@ impl DBChunk {
             partition_key,
         })
     }
-}
-
-#[async_trait]
-impl PartitionChunk for DBChunk {
-    type Error = Error;
-
-    fn id(&self) -> u32 {
-        match self {
-            Self::MutableBuffer { chunk } => chunk.id(),
-            Self::ReadBuffer { chunk_id, .. } => *chunk_id,
-            Self::ParquetFile => unimplemented!("parquet file not implemented"),
-        }
-    }
-
-    fn table_stats(&self) -> Result<Vec<data_types::partition_metadata::Table>, Self::Error> {
-        match self {
-            Self::MutableBuffer { chunk } => chunk.table_stats().context(MutableBufferChunk),
-            Self::ReadBuffer { .. } => unimplemented!("read buffer not implemented"),
-            Self::ParquetFile => unimplemented!("parquet file not implemented"),
-        }
-    }
 
     fn table_to_arrow(
         &self,
         dst: &mut Vec<RecordBatch>,
         table_name: &str,
         columns: &[&str],
-    ) -> Result<(), Self::Error> {
+    ) -> Result<()> {
         match self {
             Self::MutableBuffer { chunk } => {
                 chunk
@@ -144,6 +124,27 @@ impl PartitionChunk for DBChunk {
         }
         Ok(())
     }
+}
+
+#[async_trait]
+impl PartitionChunk for DBChunk {
+    type Error = Error;
+
+    fn id(&self) -> u32 {
+        match self {
+            Self::MutableBuffer { chunk } => chunk.id(),
+            Self::ReadBuffer { chunk_id, .. } => *chunk_id,
+            Self::ParquetFile => unimplemented!("parquet file not implemented"),
+        }
+    }
+
+    fn table_stats(&self) -> Result<Vec<data_types::partition_metadata::Table>, Self::Error> {
+        match self {
+            Self::MutableBuffer { chunk } => chunk.table_stats().context(MutableBufferChunk),
+            Self::ReadBuffer { .. } => unimplemented!("read buffer not implemented"),
+            Self::ParquetFile => unimplemented!("parquet file not implemented"),
+        }
+    }
 
     async fn table_names(&self, predicate: &Predicate) -> Result<LogicalPlan, Self::Error> {
         match self {
@@ -174,5 +175,21 @@ impl PartitionChunk for DBChunk {
                 unimplemented!("parquet file not implemented")
             }
         }
+    }
+
+    async fn table_schema(
+        &self,
+        table_name: &str,
+    ) -> Result<arrow_deps::arrow::datatypes::SchemaRef, Self::Error> {
+        todo!()
+    }
+
+    fn scan_data(
+        &self,
+        table_name: &str,
+        predicate: &Predicate,
+        selection: query::selection::Selection<'_>,
+    ) -> Result<SendableRecordBatchStream, Self::Error> {
+        todo!()
     }
 }

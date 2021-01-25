@@ -5,7 +5,10 @@
     clippy::use_self
 )]
 
-use arrow_deps::{arrow::record_batch::RecordBatch, datafusion::logical_plan::LogicalPlan};
+use arrow_deps::{
+    arrow::datatypes::SchemaRef,
+    datafusion::{logical_plan::LogicalPlan, physical_plan::SendableRecordBatchStream},
+};
 use async_trait::async_trait;
 use data_types::{data::ReplicatedWrite, partition_metadata::Table as TableStats};
 use exec::{Executor, FieldListPlan, SeriesSetPlans, StringSetPlan};
@@ -17,10 +20,13 @@ pub mod frontend;
 pub mod func;
 pub mod group_by;
 pub mod predicate;
+pub mod provider;
+pub mod selection;
 pub mod util;
 
 use self::group_by::GroupByAndAggregate;
 use self::predicate::Predicate;
+use self::selection::Selection;
 
 /// A `Database` is the main trait implemented by the IOx subsystems
 /// that store actual data.
@@ -128,14 +134,22 @@ pub trait PartitionChunk: Debug + Send + Sync {
     /// desired.
     async fn table_names(&self, predicate: &Predicate) -> Result<LogicalPlan, Self::Error>;
 
-    /// converts the table to an Arrow RecordBatch and writes to dst
-    /// TODO turn this into a streaming interface
-    fn table_to_arrow(
+    /// Return the schema for the specified table
+    async fn table_schema(&self, table_name: &str) -> Result<SchemaRef, Self::Error>;
+
+    /// Provides access to raw Chunk data as streams of RecordBatches
+    /// This is part of the analog of the `TableProvider` in DataFusion
+    ///
+    /// The reason we can't simply use the TableProvider trait
+    /// directly is that the data for a particular Table lives in
+    /// several chunks within a partition, so there needs to be an
+    /// implementation of TableProvider that stitches together chunks
+    fn scan_data(
         &self,
-        dst: &mut Vec<RecordBatch>,
         table_name: &str,
-        columns: &[&str],
-    ) -> Result<(), Self::Error>;
+        predicate: &Predicate,
+        selection: Selection<'_>,
+    ) -> Result<SendableRecordBatchStream, Self::Error>;
 }
 
 #[async_trait]

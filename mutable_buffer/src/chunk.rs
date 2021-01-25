@@ -480,17 +480,24 @@ impl query::PartitionChunk for Chunk {
         self.table_stats()
     }
 
-    fn table_to_arrow(
-        &self,
-        dst: &mut Vec<RecordBatch>,
-        table_name: &str,
-        columns: &[&str],
-    ) -> Result<(), Self::Error> {
-        self.table_to_arrow(dst, table_name, columns)
+    async fn table_names(&self, _predicate: &Predicate) -> Result<LogicalPlan, Self::Error> {
+        unimplemented!("This function is slated for removal")
     }
 
-    async fn table_names(&self, _predicate: &Predicate) -> Result<LogicalPlan, Self::Error> {
-        unimplemented!("please use table_names function directly")
+    async fn table_schema(
+        &self,
+        _table_name: &str,
+    ) -> Result<arrow_deps::arrow::datatypes::SchemaRef, Self::Error> {
+        todo!()
+    }
+
+    fn scan_data(
+        &self,
+        _table_name: &str,
+        _predicate: &Predicate,
+        _selection: query::selection::Selection<'_>,
+    ) -> Result<arrow_deps::datafusion::physical_plan::SendableRecordBatchStream, Self::Error> {
+        todo!()
     }
 }
 
