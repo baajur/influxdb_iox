@@ -1,17 +1,20 @@
 use arrow_deps::{
-    arrow::record_batch::RecordBatch, datafusion::logical_plan::LogicalPlan,
+    arrow::{datatypes::SchemaRef, error::Result as ArrowResult, record_batch::RecordBatch},
+    datafusion::{
+        logical_plan::LogicalPlan,
+        physical_plan::{RecordBatchStream, SendableRecordBatchStream},
+    },
     util::str_iter_to_batch,
 };
 use data_types::{schema::Schema, selection::Selection};
-use query::{
-    predicate::{Predicate, PredicateBuilder},
-    util::make_scan_plan,
-    PartitionChunk,
-};
-use read_buffer::Database as ReadBufferDb;
+use query::{predicate::Predicate, util::make_scan_plan, PartitionChunk};
+use read_buffer::{Database as ReadBufferDb, ReadFilterResults};
 use snafu::{ResultExt, Snafu};
 
-use std::sync::{Arc, RwLock};
+use std::{
+    sync::{Arc, RwLock},
+    task::{Context, Poll},
+};
 
 use super::pred::to_read_buffer_predicate;
 
@@ -99,49 +102,6 @@ impl PartitionChunk for DBChunk {
             Self::ReadBuffer { .. } => unimplemented!("read buffer not implemented"),
             Self::ParquetFile => unimplemented!("parquet file not implemented"),
         }
-    }
-
-    fn table_to_arrow(
-        &self,
-        dst: &mut Vec<RecordBatch>,
-        table_name: &str,
-        selection: Selection<'_>,
-    ) -> Result<(), Self::Error> {
-        match self {
-            Self::MutableBuffer { chunk } => {
-                chunk
-                    .table_to_arrow(dst, table_name, selection)
-                    .context(MutableBufferChunk)?;
-            }
-            Self::ReadBuffer {
-                db,
-                partition_key,
-                chunk_id,
-            } => {
-                let chunk_id = *chunk_id;
-                // Translate the predicate and selection to ReadBuffer style
-                let predicate = PredicateBuilder::default().build();
-                let rb_predicate =
-                    to_read_buffer_predicate(&predicate).context(InternalPredicateConversion)?;
-
-                // run the query
-                let db = db.read().unwrap();
-                let read_result = db
-                    .read_filter(
-                        partition_key,
-                        table_name,
-                        &[chunk_id],
-                        rb_predicate,
-                        selection,
-                    )
-                    .context(ReadBufferChunk { chunk_id })?;
-
-                // copy the RecordBatches into dst
-                dst.extend(read_result);
-            }
-            Self::ParquetFile => unimplemented!("parquet file not implemented"),
-        }
-        Ok(())
     }
 
     async fn table_names(&self, predicate: &Predicate) -> Result<LogicalPlan, Self::Error> {
@@ -253,4 +213,164 @@ impl PartitionChunk for DBChunk {
             }
         }
     }
+
+    async fn read_filter(
+        &self,
+        table_name: &str,
+        predicate: &Predicate,
+        selection: Selection<'_>,
+    ) -> Result<SendableRecordBatchStream, Self::Error> {
+        match self {
+            DBChunk::MutableBuffer { chunk } => {
+                // Mutable buffer doesn'really support predicate
+                // pushdown (other than pruning out the entire chunk
+                // via `might_pass_predicate)
+
+                // TODO make some sort of lazy evaluator. For now, materialize here
+                let mut batches = Vec::new();
+                chunk
+                    .table_to_arrow(&mut batches, table_name, selection.clone())
+                    .context(MutableBufferChunk)?;
+                let schema = if let Some(batch) = batches.iter().next() {
+                    batch.schema()
+                } else {
+                    self.table_schema(table_name, selection).await?.into()
+                };
+
+                Ok(Box::pin(MemoryStream::new(batches, schema)))
+            }
+            DBChunk::ReadBuffer {
+                db,
+                partition_key,
+                chunk_id,
+            } => {
+                let chunk_id = *chunk_id;
+                let rb_predicate =
+                    to_read_buffer_predicate(&predicate).context(InternalPredicateConversion)?;
+                let db = db.read().expect("mutex poisoned");
+                let read_results = db
+                    .read_filter(
+                        partition_key,
+                        table_name,
+                        &[chunk_id],
+                        rb_predicate,
+                        selection,
+                    )
+                    .context(ReadBufferChunk { chunk_id })?;
+
+                let schema = read_results
+                    .schema()
+                    .context(ReadBufferChunk { chunk_id })?
+                    .into();
+
+                Ok(Box::pin(ReadFilterResultsStream {
+                    read_results,
+                    schema,
+                }))
+            }
+            DBChunk::ParquetFile => {
+                unimplemented!("parquet file not implemented for scan_data")
+            }
+        }
+    }
+
+    fn could_pass_predicate(&self, _predicate: &Predicate) -> Result<bool> {
+        match self {
+            DBChunk::MutableBuffer { .. } => {
+                // For now, we might get an error if we try and
+                // compile a chunk predicate (e.g. for tables that
+                // don't exist in the chunk) which could signal the
+                // chunk can't pass the predicate.
+
+                // However, we can also get an error if there is some
+                // unsupported operation and we need a way to
+                // distinguish the two cases.
+                return Ok(true);
+            }
+            DBChunk::ReadBuffer { .. } => {
+                // TODO: ask Edd how he wants this wired up in the read buffer
+                Ok(true)
+            }
+            DBChunk::ParquetFile => {
+                // TODO proper filtering for parquet files
+                Ok(true)
+            }
+        }
+    }
+}
+
+/// Create something which will stream out a pre-defined set of  record batches
+pub(crate) struct MemoryStream {
+    /// Vector of record batches to send in reverse order (send data[len-1]
+    /// next)
+    data: Vec<RecordBatch>,
+    /// Schema
+    schema: SchemaRef,
+    /// Index into the data to next send
+    index: usize,
+}
+
+impl MemoryStream {
+    /// Create an iterator for a vector of record batches
+    pub fn new(mut data: Vec<RecordBatch>, schema: SchemaRef) -> Self {
+        data.reverse();
+
+        Self {
+            data,
+            schema,
+            index: 0,
+        }
+    }
+}
+
+impl RecordBatchStream for MemoryStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl futures::Stream for MemoryStream {
+    type Item = ArrowResult<RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Poll::Ready(if self.index < self.data.len() {
+            let batch = self.data[self.index].clone();
+            self.index += 1;
+            Some(Ok(batch))
+        } else {
+            None
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.data.len(), Some(self.data.len()))
+    }
+}
+
+/// Adapter which will take a ReadFilterResults and make it an async stream
+struct ReadFilterResultsStream {
+    read_results: ReadFilterResults,
+    schema: SchemaRef,
+}
+
+impl RecordBatchStream for ReadFilterResultsStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl futures::Stream for ReadFilterResultsStream {
+    type Item = ArrowResult<RecordBatch>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Poll::Ready(Ok(self.read_results.next()).transpose())
+    }
+
+    // TODO is there a useful size_hint to pass?
 }
