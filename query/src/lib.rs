@@ -134,7 +134,8 @@ pub trait PartitionChunk: Debug + Send + Sync {
     /// desired.
     async fn table_names(&self, predicate: &Predicate) -> Result<LogicalPlan, Self::Error>;
 
-    /// Return the schema for the specified table
+    /// Return the schema for the specified table for the specified columns.
+    /// TODO: add selection to this parameter to specify which columns
     async fn table_schema(&self, table_name: &str) -> Result<SchemaRef, Self::Error>;
 
     /// Provides access to raw Chunk data as streams of RecordBatches

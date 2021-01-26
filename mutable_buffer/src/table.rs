@@ -25,7 +25,7 @@ use arrow_deps::{
     arrow,
     arrow::{
         array::{ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, StringBuilder},
-        datatypes::DataType as ArrowDataType,
+        datatypes::{DataType as ArrowDataType, SchemaRef},
         record_batch::RecordBatch,
     },
     datafusion::{
@@ -861,6 +861,40 @@ impl Table {
         self.to_arrow_impl(chunk, &requested_columns_with_index)
     }
 
+    // Returns an arrow table schema for this table for the specified columns
+    pub fn arrow_schema(&self, chunk: &Chunk, requested_columns: &[&str]) -> Result<SchemaRef> {
+        let requested_columns_with_index =
+            self.column_names_with_index(chunk, requested_columns)?;
+
+        self.arrow_schema_impl(&requested_columns_with_index)
+    }
+
+    fn arrow_schema_impl(
+        &self,
+        requested_columns_with_index: &[(&str, usize)],
+    ) -> Result<SchemaRef> {
+        let schema_builder = requested_columns_with_index.iter().fold(
+            SchemaBuilder::new(),
+            |schema_builder, &(column_name, column_index)| match &self.columns[column_index] {
+                Column::String(_, _) => schema_builder.field(column_name, ArrowDataType::Utf8),
+                Column::Tag(_, _) => schema_builder.tag(column_name),
+                Column::F64(_, _) => schema_builder.field(column_name, ArrowDataType::Float64),
+                Column::I64(_, _) => {
+                    if column_name == TIME_COLUMN_NAME {
+                        schema_builder.timestamp()
+                    } else {
+                        schema_builder.field(column_name, ArrowDataType::Int64)
+                    }
+                }
+                Column::Bool(_, _) => schema_builder.field(column_name, ArrowDataType::Boolean),
+            },
+        );
+
+        let schema: SchemaRef = schema_builder.build().context(InternalSchema)?.into();
+
+        Ok(schema)
+    }
+
     /// Converts this table to an arrow record batch,
     ///
     /// requested columns with index are tuples of column_name, column_index
@@ -869,13 +903,11 @@ impl Table {
         chunk: &Chunk,
         requested_columns_with_index: &[(&str, usize)],
     ) -> Result<RecordBatch> {
-        let mut schema_builder = SchemaBuilder::new();
         let mut columns: Vec<ArrayRef> = Vec::with_capacity(requested_columns_with_index.len());
 
-        for &(column_name, column_index) in requested_columns_with_index.iter() {
+        for &(_, column_index) in requested_columns_with_index.iter() {
             let arrow_col: ArrayRef = match &self.columns[column_index] {
                 Column::String(vals, _) => {
-                    schema_builder = schema_builder.field(column_name, ArrowDataType::Utf8);
                     let mut builder = StringBuilder::with_capacity(vals.len(), vals.len() * 10);
 
                     for v in vals {
@@ -889,7 +921,6 @@ impl Table {
                     Arc::new(builder.finish())
                 }
                 Column::Tag(vals, _) => {
-                    schema_builder = schema_builder.tag(column_name);
                     let mut builder = StringBuilder::with_capacity(vals.len(), vals.len() * 10);
 
                     for v in vals {
@@ -911,7 +942,6 @@ impl Table {
                     Arc::new(builder.finish())
                 }
                 Column::F64(vals, _) => {
-                    schema_builder = schema_builder.field(column_name, ArrowDataType::Float64);
                     let mut builder = Float64Builder::new(vals.len());
 
                     for v in vals {
@@ -921,11 +951,6 @@ impl Table {
                     Arc::new(builder.finish())
                 }
                 Column::I64(vals, _) => {
-                    schema_builder = if column_name == TIME_COLUMN_NAME {
-                        schema_builder.timestamp()
-                    } else {
-                        schema_builder.field(column_name, ArrowDataType::Int64)
-                    };
                     let mut builder = Int64Builder::new(vals.len());
 
                     for v in vals {
@@ -935,7 +960,6 @@ impl Table {
                     Arc::new(builder.finish())
                 }
                 Column::Bool(vals, _) => {
-                    schema_builder = schema_builder.field(column_name, ArrowDataType::Boolean);
                     let mut builder = BooleanBuilder::new(vals.len());
 
                     for v in vals {
@@ -949,7 +973,7 @@ impl Table {
             columns.push(arrow_col);
         }
 
-        let schema = schema_builder.build().context(InternalSchema)?.into();
+        let schema = self.arrow_schema_impl(requested_columns_with_index)?;
 
         RecordBatch::try_new(schema, columns).context(ArrowError {})
     }

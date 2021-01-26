@@ -1,8 +1,8 @@
 //! This module contains code for snapshotting a database chunk to Parquet
 //! files in object storage.
 use arrow_deps::{
-    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
-    datafusion::physical_plan::{common::collect, SendableRecordBatchStream},
+    arrow::datatypes::SchemaRef,
+    datafusion::physical_plan::SendableRecordBatchStream,
     parquet::{self, arrow::ArrowWriter, file::writer::TryClone},
 };
 use data_types::partition_metadata::{Partition as PartitionMeta, Table};

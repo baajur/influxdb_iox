@@ -1,10 +1,11 @@
 use arrow_deps::{
-    arrow::record_batch::RecordBatch,
+    arrow::{datatypes::SchemaRef, record_batch::RecordBatch},
     datafusion::{logical_plan::LogicalPlan, physical_plan::SendableRecordBatchStream},
     util::str_iter_to_batch,
 };
 use query::{
     predicate::{Predicate, PredicateBuilder},
+    selection::Selection,
     util::make_scan_plan,
     PartitionChunk,
 };
@@ -126,6 +127,15 @@ impl DBChunk {
     }
 }
 
+const ALL_COLUMNS: &[&str] = &[];
+
+fn to_mutable_buffer_selection<'a>(selection: Selection<'a>) -> &'a [&'a str] {
+    match selection {
+        Selection::AllColumns => ALL_COLUMNS,
+        Selection::SpecifiedColumns(cols) => cols,
+    }
+}
+
 #[async_trait]
 impl PartitionChunk for DBChunk {
     type Error = Error;
@@ -177,18 +187,25 @@ impl PartitionChunk for DBChunk {
         }
     }
 
-    async fn table_schema(
-        &self,
-        table_name: &str,
-    ) -> Result<arrow_deps::arrow::datatypes::SchemaRef, Self::Error> {
-        todo!()
+    async fn table_schema(&self, table_name: &str) -> Result<SchemaRef, Self::Error> {
+        let selection = Selection::AllColumns;
+        match self {
+            Self::MutableBuffer { chunk } => {
+                let selection = to_mutable_buffer_selection(selection);
+                chunk
+                    .table_schema(table_name, selection)
+                    .context(MutableBufferChunk)
+            }
+            Self::ReadBuffer { .. } => unimplemented!("read buffer table_schema not implemented"),
+            Self::ParquetFile => unimplemented!("parquet file table_schema not implemented"),
+        }
     }
 
     fn scan_data(
         &self,
         table_name: &str,
         predicate: &Predicate,
-        selection: query::selection::Selection<'_>,
+        selection: Selection<'_>,
     ) -> Result<SendableRecordBatchStream, Self::Error> {
         todo!()
     }

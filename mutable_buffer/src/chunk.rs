@@ -1,6 +1,9 @@
 //! Represents a Chunk of data (a collection of tables and their data within
 //! some chunk) in the mutable store.
-use arrow_deps::datafusion::{error::Result as ArrowResult, logical_plan::LogicalPlan};
+use arrow_deps::{
+    arrow::datatypes::SchemaRef,
+    datafusion::{error::Result as ArrowResult, logical_plan::LogicalPlan},
+};
 use arrow_deps::{
     arrow::record_batch::RecordBatch,
     datafusion::{
@@ -65,6 +68,9 @@ pub enum Error {
 
     #[snafu(display("Table {} not found in chunk {}", table, chunk))]
     TableNotFoundInChunk { table: u32, chunk: u64 },
+
+    #[snafu(display("Table {} not found in chunk {}", table_name, chunk_id))]
+    NamedTableNotInChunk { table_name: String, chunk_id: u64 },
 
     #[snafu(display("Time Column was not not found in chunk {}", chunk))]
     TimeColumnNotFoundInChunk { chunk: u64, source: DictionaryError },
@@ -406,6 +412,21 @@ impl Chunk {
             );
         }
         Ok(())
+    }
+
+    /// record batches, appended to dst
+    pub fn table_schema(&self, table_name: &str, columns: &[&str]) -> Result<SchemaRef> {
+        if let Some(table) = self.table(table_name)? {
+            table
+                .arrow_schema(self, columns)
+                .context(NamedTableError { table_name })
+        } else {
+            NamedTableNotInChunk {
+                table_name,
+                chunk_id: self.id(),
+            }
+            .fail()
+        }
     }
 
     /// Returns a vec of the summary statistics of the tables in this chunk
