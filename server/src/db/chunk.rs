@@ -127,6 +127,7 @@ impl DBChunk {
     }
 }
 
+// TODO put this in a struct in the mutable buffer crate and call it from here
 const ALL_COLUMNS: &[&str] = &[];
 
 fn to_mutable_buffer_selection<'a>(selection: Selection<'a>) -> &'a [&'a str] {

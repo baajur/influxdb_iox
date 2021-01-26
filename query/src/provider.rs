@@ -121,7 +121,7 @@ impl<C: PartitionChunk + 'static> TableProvider for ChunkTableProvider<C> {
     }
 
     fn schema(&self) -> SchemaRef {
-        todo!()
+        self.schema.clone()
     }
 
     fn scan(
